@@ -20,6 +20,8 @@ import type { Data } from 'plotly.js';
 import PlotlyChart from '@/components/PlotlyChart';
 
 const queryClient = new QueryClient();
+// Base URL of the separately deployed API service (build-time). Empty = same origin.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 type HistoryItem = { id: string; module: string; title: string; detail: string; at: number; href: string };
 type ObservationRow = { x_value: number; observed_y: number };
 type SavedDataset = {
@@ -384,7 +386,7 @@ function Fitting() {
     }
     setNumericPending(true);
     try {
-      const response = await fetch('/api/data/fit-ode', {
+      const response = await fetch(`${API_BASE}/api/data/fit-ode`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({m: odeM, n: odeN, observations, x0: Number(initialX), initial_guess: Number(initialGuess)})
       });
