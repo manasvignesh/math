@@ -14,7 +14,6 @@ import {
   ChevronDown,
   CircleHelp,
   Clock3,
-  Command,
   Database,
   FileSpreadsheet,
   FlaskConical,
@@ -173,7 +172,7 @@ function AppFrame({ children }: { children: ReactNode }) {
           </span>
           <span className="brand-name">
             Equation<span>Path</span>
-            <small>ODE WORKSPACE</small>
+            <small>THE MATHEMATICS STUDIO</small>
           </span>
         </Link>
         <div className="side-caption">WORKSPACE</div>
@@ -238,7 +237,7 @@ function AppFrame({ children }: { children: ReactNode }) {
               <span className="status-pip" /> Mathematical workspace
             </span>
             <span className="topbar-key">
-              <Command size={13} /> local
+              <Sigma size={13} /> Unit IV / V
             </span>
           </div>
         </header>

@@ -4,6 +4,7 @@ import App from './App';
 import { ErrorBoundary } from '@/components/error-boundary';
 
 import './index.css';
+import './workspace.css';
 import { configureBrowserMath } from '@/lib/browser-math';
 
 configureBrowserMath();
