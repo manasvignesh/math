@@ -66,3 +66,9 @@ The solver additionally offers **Compare with observations** only for explicitly
 | -2*x | 1 | dy/dx = 2x | quadratic |
 
 The transfer preserves the source equation in browser local storage, preselects the correct model family, and retains CSV upload / case selection and residual plotting. More general exact ODEs can be visualized but **cannot yet be fitted automatically**; this restriction is intentional to prevent presenting an unrelated fitted family as if it came from the entered equation. Matching is a strict whitelist of recognized expression spellings, not symbolic equivalence of arbitrary inputs.
+
+## Numerical fitting of a user-entered first-order ODE
+
+The Data Fitting module now offers **Fit entered ODE**, alongside the existing three analytic sample families. Provide `M(x,y)`, `N(x,y)`, at least three observations and an initial `x₀`. The math service uses SciPy `solve_ivp` to evaluate the single regular `y(x)` branch and `least_squares` to estimate `y(x₀)`. It returns predictions, row-level residuals and the same error metrics/plots as sample fitting. A completed equation in the Solver can open this mode with M and N carried over.
+
+The numerical fitter is local and bounded (3–200 observations, x-values within 100 units of x₀, max 90 residual evaluations). It cannot handle vertical curves, singular paths, arbitrary additional model parameters, or certify uniqueness/global optimality. Inspect the fit and model-domain warnings; a low RMSE does not establish physical validity.

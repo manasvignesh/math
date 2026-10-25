@@ -92,6 +92,19 @@ router.post("/data/analyze", async (req, res): Promise<void> => {
   res.json(AnalyzeDatasetResponse.parse(result));
 });
 
+router.post("/data/fit-ode", async (req, res): Promise<void> => {
+  const body: unknown = req.body;
+  if (!body || typeof body !== "object" || !("m" in body) || !("n" in body) ||
+      !("observations" in body) || typeof body.m !== "string" || typeof body.n !== "string" ||
+      body.m.length > 400 || body.n.length > 400 || !Array.isArray(body.observations) ||
+      body.observations.length < 3 || body.observations.length > 200) {
+    res.status(400).json({ error: "Provide valid M, N and 3–200 observations." });
+    return;
+  }
+  const result = await forward(req, res, "/data/fit-ode", body);
+  if (result !== null) res.json(result);
+});
+
 router.get("/examples", async (req, res): Promise<void> => {
   const result = await forward(req, res, "/examples");
   if (result === null) return;

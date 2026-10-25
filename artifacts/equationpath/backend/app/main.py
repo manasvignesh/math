@@ -11,6 +11,7 @@ import sympy as sp
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from scipy.integrate import solve_ivp
+from scipy.optimize import least_squares
 
 x, y = sp.symbols("x y", real=True)
 _ALLOWED_FUNCTIONS = {
@@ -50,6 +51,12 @@ class PlotInput(EquationInput):
 class Observation(BaseModel):
     x_value: float
     observed_y: float
+
+
+class NumericalFitInput(EquationInput):
+    observations: list[Observation] = Field(min_length=3, max_length=200)
+    x0: float = 0.0
+    initial_guess: float = 1.0
 
 
 class AnalyzeInput(BaseModel):
@@ -342,6 +349,89 @@ def analyze_dataset(request: AnalyzeInput) -> dict[str, Any]:
         "model": request.model, "parameter_name": "C" if parameter is not None else None,
         "parameter_value": parameter, "rows": rows, "metrics": metrics,
         "note": note if parameter is not None else f"{note} Enable parameter fitting to calculate calibrated predictions and metrics.",
+    }
+
+
+
+def _predict_from_initial(m: sp.Expr, n: sp.Expr, x0: float, y0: float, xs: np.ndarray) -> np.ndarray:
+    """Evaluate the single y(x) branch through (x0, y0), without extrapolating through failures."""
+    m_fun = sp.lambdify((x, y), m, modules=["numpy"])
+    n_fun = sp.lambdify((x, y), n, modules=["numpy"])
+
+    def slope(t: float, state: np.ndarray) -> list[float]:
+        with np.errstate(all="ignore"):
+            numerator, denominator = float(m_fun(t, state[0])), float(n_fun(t, state[0]))
+        if not np.isfinite(numerator) or not np.isfinite(denominator) or abs(denominator) < 1e-9:
+            raise ValueError("ODE is singular on this solution branch.")
+        result = -numerator / denominator
+        if not np.isfinite(result) or abs(result) > 1e8:
+            raise ValueError("ODE slope is invalid on this solution branch.")
+        return [result]
+
+    result = np.empty_like(xs)
+    for side in (-1, 1):
+        ids = [i for i, val in enumerate(xs) if (val < x0 if side == -1 else val > x0)]
+        if not ids:
+            continue
+        ordered = sorted(ids, key=lambda i: abs(xs[i] - x0))
+        targets = xs[ordered]
+        try:
+            sol = solve_ivp(slope, (x0, float(targets[-1])), [y0], t_eval=targets,
+                            rtol=1e-7, atol=1e-9, max_step=max(abs(float(targets[-1]) - x0) / 80, 0.005))
+        except (ValueError, OverflowError, TypeError, ZeroDivisionError) as exc:
+            raise ValueError("Numerical solution encountered a singularity or invalid domain.") from exc
+        if not sol.success or sol.y.shape[1] != len(targets):
+            raise ValueError("Numerical solution did not reach all observations.")
+        result[ordered] = sol.y[0]
+    result[np.isclose(xs, x0, atol=1e-12, rtol=0)] = y0
+    if not np.all(np.isfinite(result)):
+        raise ValueError("Nonfinite model prediction.")
+    return result
+
+
+@app.post("/data/fit-ode")
+def fit_ode_dataset(request: NumericalFitInput) -> dict[str, Any]:
+    """Fit the initial value for a user-provided ODE; no fixed example family required."""
+    m, n = _parsed(request.m, request.n)
+    if sp.simplify(n) == 0:
+        raise HTTPException(status_code=400, detail="N is zero; cannot evaluate dy/dx = -M/N.")
+    xs = np.array([row.x_value for row in request.observations], dtype=float)
+    actual = np.array([row.observed_y for row in request.observations], dtype=float)
+    if not np.all(np.isfinite(xs)) or not np.all(np.isfinite(actual)) or not math.isfinite(request.x0) or not math.isfinite(request.initial_guess):
+        raise HTTPException(status_code=400, detail="Input values must be finite.")
+    if len(set(xs.tolist())) != len(xs):
+        raise HTTPException(status_code=400, detail="Duplicate x coordinates are not supported.")
+    if np.max(np.abs(xs - request.x0)) > 100:
+        raise HTTPException(status_code=400, detail="Observations must be within 100 x-units of x0.")
+
+    def residual(parameter: np.ndarray) -> np.ndarray:
+        try:
+            return _predict_from_initial(m, n, request.x0, float(parameter[0]), xs) - actual
+        except (ValueError, OverflowError):
+            return np.full(len(xs), 1e9)
+
+    try:
+        optimized = least_squares(residual, [request.initial_guess], bounds=(-1e5, 1e5), max_nfev=90)
+        y0_fit = float(optimized.x[0])
+        predictions = _predict_from_initial(m, n, request.x0, y0_fit, xs)
+    except (ValueError, OverflowError) as exc:
+        raise HTTPException(status_code=422, detail=f"Could not fit a valid numerical solution: {exc}") from exc
+    if not optimized.success or not np.all(np.isfinite(predictions)) or np.max(np.abs(predictions - actual)) >= 1e8:
+        raise HTTPException(status_code=422, detail="Could not obtain a reliable numerical fit on this domain.")
+    errors = actual - predictions
+    mse = float(np.mean(errors**2))
+    sst = float(np.sum((actual - actual.mean())**2))
+    sse = float(np.sum(errors**2))
+    return {
+        "model": "numerical_ode", "parameter_name": "y0", "parameter_value": y0_fit,
+        "rows": [
+            {"x_value": float(t), "observed_y": float(obs), "predicted_y": float(pred),
+             "residual": float(err), "squared_residual": float(err**2)}
+            for t, obs, pred, err in zip(xs, actual, predictions, errors, strict=True)
+        ],
+        "metrics": {"mse": mse, "rmse": math.sqrt(mse), "mae": float(np.mean(np.abs(errors))),
+                    "r_squared": 1 - sse/sst if sst > 0 else None},
+        "note": f"Numerical fit for M dx + N dy = 0, estimating y({request.x0}) via SciPy. This is a local least-squares fit of one regular solution branch; it does not prove the model is physically valid.",
     }
 
 

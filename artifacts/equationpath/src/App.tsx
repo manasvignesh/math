@@ -20,6 +20,8 @@ import type { Data } from 'plotly.js';
 import PlotlyChart from '@/components/PlotlyChart';
 
 const queryClient = new QueryClient();
+// Base URL of the separately deployed API service (build-time). Empty = same origin.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 type HistoryItem = { id: string; module: string; title: string; detail: string; at: number; href: string };
 type ObservationRow = { x_value: number; observed_y: number };
 type SavedDataset = {
@@ -237,7 +239,6 @@ function Solver() {
   const { data: examples } = useGetExamples({ query: { queryKey: getGetExamplesQueryKey() } });
   useEffect(() => { const ex = examples?.examples?.find((item) => item.id === query.get('example')); if (ex) { setM(ex.m); setN(ex.n); } }, [examples, query.get('example')]);
   const payload = { m: m.trim(), n: n.trim() };
-  const supportedFitModel = fitFamily(m, n);
   const runCheck = () => check.mutate({ data: payload }, { onSuccess: (res) => { setExact(res); setSolution(null); addHistory({ module: 'Exactness solver', title: 'Exactness check', detail: `${payload.m} dx + ${payload.n} dy`, href: '/solver' }); } });
   const runSolve = () => solve.mutate({ data: payload }, { onSuccess: (res) => { setSolution(res); if (res.status === 'solved') saveTransferredEquation(payload.m, payload.n); addHistory({ module: 'Exactness solver', title: 'Equation solved', detail: `${payload.m} dx + ${payload.n} dy`, href: '/solver' }); } });
   const fillExample = (ex: Example) => { setM(ex.m); setN(ex.n); setExact(null); setSolution(null); };
@@ -256,7 +257,7 @@ function Solver() {
           <div className="explanation"><span className="explanation-mark"><Info size={16} /></span><div><b>{exact.method}</b><p>{exact.explanation}</p>{exact.factor && <p className="factor-line">Supported integrating factor <code>μ = {exact.factor}</code></p>}</div></div>
         </Card>}
         {solution && <Card className="solution-card"><div className="card-head"><div><div className="eyebrow">SOLUTION · {solution.method}</div><h3>Follow the derivation</h3></div><ResultPill good={solution.status === 'success' || solution.status === 'solved'}>{solution.status}</ResultPill></div>
-          {solution.status === 'solved' && <div className="equation-actions"><Link href="/visualizer?from=solver" onClick={() => saveTransferredEquation(payload.m, payload.n)} className="btn btn-secondary">Visualize this equation <ArrowRight size={15} /></Link>{supportedFitModel ? <Link href="/fitting?from=solver" onClick={() => saveTransferredEquation(payload.m, payload.n)} className="btn btn-primary">Compare with observations <ArrowRight size={15} /></Link> : <span className="helper-note">Direct parameter fitting is currently supported only for y' = -y, y' = 2y and y' = 2x.</span>}</div>}
+          {solution.status === 'solved' && <div className="equation-actions"><Link href="/visualizer?from=solver" onClick={() => saveTransferredEquation(payload.m, payload.n)} className="btn btn-secondary">Visualize this equation <ArrowRight size={15} /></Link><Link href="/fitting?from=solver" onClick={() => saveTransferredEquation(payload.m, payload.n)} className="btn btn-primary">Fit observations numerically <ArrowRight size={15} /></Link></div>}
           {solution.implicit_solution && <div className="potential-result"><small>IMPLICIT SOLUTION</small><strong>{solution.implicit_solution}</strong></div>}
           {solution.potential && <div className="potential-result secondary-result"><small>POTENTIAL FUNCTION</small><strong>{solution.potential}</strong></div>}
           {solution.steps?.length ? <ol className="steps-list">{solution.steps.map((step: string, i: number) => <li key={`${i}-${step}`}><span>{String(i + 1).padStart(2, '0')}</span><p>{step}</p></li>)}</ol> : <div className="empty-inline">The solver did not return derivation steps for this input.</div>}
@@ -344,6 +345,13 @@ function Fitting() {
   const transferred = new URLSearchParams(window.location.search).get('from') === 'solver' ? getTransferredEquation() : null;
   const [model, setModel] = useState<'decay' | 'growth' | 'quadratic'>(transferred?.model || 'decay');
   const [fitParameter, setFitParameter] = useState(true);
+  const [numericMode, setNumericMode] = useState(Boolean(transferred));
+  const [odeM, setOdeM] = useState(transferred?.m || 'y');
+  const [odeN, setOdeN] = useState(transferred?.n || '1');
+  const [initialX, setInitialX] = useState('0');
+  const [initialGuess, setInitialGuess] = useState('1');
+  const [numericPending, setNumericPending] = useState(false);
+  const [numericError, setNumericError] = useState('');
   const [observations, setObservations] = useState<{ x_value: number; observed_y: number }[]>([]);
   const [result, setResult] = useState<any>(null);
   const [csvError, setCsvError] = useState('');
@@ -369,7 +377,26 @@ function Fitting() {
     reader.onerror = () => setCsvError('The file could not be read. Try another CSV.');
     reader.readAsText(file);
   };
-  const submit = () => analyze.mutate({ data: { model, observations, fit_parameter: fitParameter } }, { onSuccess: (res) => { setResult(res); addHistory({ module: 'Data fitting', title: `${model} model fit`, detail: `${observations.length} observations · ${res.parameter_name || 'parameter'} ${fmt(res.parameter_value)}`, href: '/fitting' }); } });
+  const submit = async () => {
+    setResult(null);
+    setNumericError('');
+    if (!numericMode) {
+      analyze.mutate({ data: { model, observations, fit_parameter: fitParameter } }, { onSuccess: (res) => { setResult(res); addHistory({ module: 'Data fitting', title: `${model} model fit`, detail: `${observations.length} observations · ${res.parameter_name || 'parameter'} ${fmt(res.parameter_value)}`, href: '/fitting' }); } });
+      return;
+    }
+    setNumericPending(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/data/fit-ode`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({m: odeM, n: odeN, observations, x0: Number(initialX), initial_guess: Number(initialGuess)})
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : typeof data.error === 'string' ? data.error : 'Numerical fitting failed.');
+      setResult(data);
+      addHistory({module: 'ODE data fitting', title: 'Numerical ODE fit', detail: `${observations.length} observations · y0 = ${fmt(data.parameter_value)}`, href:'/fitting'});
+    } catch (error) { setNumericError(error instanceof Error ? error.message : 'Numerical fitting failed.'); }
+    finally { setNumericPending(false); }
+  };
   const rows = result?.rows || [];
   const metricEntries = Object.entries(result?.metrics || {});
   const resultRowKeys: string[] = Array.from(new Set<string>(rows.flatMap((r: Record<string, unknown>) => Object.keys(r))));
@@ -380,17 +407,22 @@ function Fitting() {
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'equationpath-fit-results.csv'; anchor.click(); URL.revokeObjectURL(url);
   };
   return <div className="page-content"><PageHeading eyebrow="03 / Compare" title="Data fitting" description="Compare observations with a supported solution family. Inspect the fitted parameter and residuals row by row." action={<span className="mode-chip"><Database size={14} /> MODEL COMPARISON</span>} />
-    {transferred && <div className="notice-line"><Info size={15} />From solver: {transferred.m} dx + {transferred.n} dy = 0. {transferred.model ? `Matched supported solution family: ${transferred.model}. Upload or select observations to compare.` : 'This ODE is not one of the three supported fitted families; select a sample family manually (it will not represent your entered ODE).'}</div>}
-    <div className="fitting-layout"><div className="fit-input-column"><Card><div className="card-head"><div><div className="eyebrow">1 — CHOOSE A MODEL</div><h3>Model family</h3></div><span className="step-badge">A</span></div><div className="model-options">{(['decay', 'growth', 'quadratic'] as const).map((val) => <button className={`model-option ${model === val ? 'selected' : ''}`} key={val} onClick={() => { setModel(val); setResult(null); }}><span className="radio-mark">{model === val && <i />}</span><span><b>{val.charAt(0).toUpperCase() + val.slice(1)}</b><small>{val === 'decay' ? 'Exponential decrease' : val === 'growth' ? 'Exponential increase' : 'Second-degree polynomial'}</small></span><span className="model-formula">{val === 'quadratic' ? 'ax² + bx + c' : 'aeᵏˣ'}</span></button>)}</div><label className="check-setting"><input type="checkbox" checked={fitParameter} onChange={(e) => setFitParameter(e.target.checked)} /><span><b>Fit model parameter</b><small>Estimate the model constant from the observations</small></span></label></Card>
-      <Card><div className="card-head"><div><div className="eyebrow">2 — LOAD OBSERVATIONS</div><h3>Your data</h3></div><span className="step-badge">B</span></div>
+    {transferred && <div className="notice-line"><Info size={15} />From solver: {transferred.m} dx + {transferred.n} dy = 0. {transferred.model ? `Matched supported solution family: ${transferred.model}. Upload or select observations to compare.` : 'Numerical fitting will use the transferred equation; choose the entered-ODE method to estimate its initial condition.'}</div>}
+    <div className="fitting-layout"><div className="fit-input-column"><Card>
+      <div className="card-head"><div><div className="eyebrow">COMPARISON METHOD</div><h3>Choose how to fit</h3></div></div>
+      <div className="equation-actions"><Button variant={numericMode ? 'primary' : 'secondary'} onClick={() => {setNumericMode(true);setResult(null);}}>Fit entered ODE</Button><Button variant={!numericMode ? 'primary' : 'secondary'} onClick={() => {setNumericMode(false);setResult(null);}}>Sample model</Button></div>
+      {numericMode && <><p className="small-muted">Find the initial value y(x₀) that best matches observed data using numerical integration of M dx + N dy = 0. Requires 3 or more observations and a regular y(x) branch.</p><div className="two-fields"><InputField label="M(x, y)" value={odeM} onChange={setOdeM} /><InputField label="N(x, y)" value={odeN} onChange={setOdeN} /><InputField label="Initial x₀" value={initialX} type="number" onChange={setInitialX} /><InputField label="Initial y guess" value={initialGuess} type="number" onChange={setInitialGuess} /></div></>}
+      </Card>{!numericMode && <Card><div className="card-head"><div><div className="eyebrow">1 — CHOOSE A MODEL</div><h3>Model family</h3></div><span className="step-badge">A</span></div><div className="model-options">{(['decay', 'growth', 'quadratic'] as const).map((val) => <button className={`model-option ${model === val ? 'selected' : ''}`} key={val} onClick={() => { setModel(val); setResult(null); }}><span className="radio-mark">{model === val && <i />}</span><span><b>{val.charAt(0).toUpperCase() + val.slice(1)}</b><small>{val === 'decay' ? 'Exponential decrease' : val === 'growth' ? 'Exponential increase' : 'Second-degree polynomial'}</small></span><span className="model-formula">{val === 'quadratic' ? 'ax² + bx + c' : 'aeᵏˣ'}</span></button>)}</div><label className="check-setting"><input type="checkbox" checked={fitParameter} onChange={(e) => setFitParameter(e.target.checked)} /><span><b>Fit model parameter</b><small>Estimate the model constant from the observations</small></span></label></Card>
+      }<Card><div className="card-head"><div><div className="eyebrow">2 — LOAD OBSERVATIONS</div><h3>Your data</h3></div><span className="step-badge">B</span></div>
         <label className="upload-zone" onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); const file = e.dataTransfer.files[0]; if (file) parseCsv(file); }}><input type="file" accept=".csv,text/csv,.tsv,text/tab-separated-values" onChange={(e) => { const file = e.target.files?.[0]; if (file) parseCsv(file); e.currentTarget.value = ''; }} data-testid="input-csv-upload" /><span className="upload-icon"><ArrowDownToLine size={18} /></span><span><b>Drop a CSV here or browse files</b><small>Required columns: case_id, x_value, observed_y</small></span></label>
         {datasets.length > 0 && <div className="dataset-samples"><span className="field-label">OR LOAD VERIFIED SAMPLE</span><select value="" onChange={(e) => { const idx = Number(e.target.value); if (!Number.isNaN(idx)) loadDataset(datasets[idx] as Record<string, any>); }} data-testid="select-sample-dataset"><option value="" disabled>Choose an API sample dataset…</option>{datasets.map((d: any, i: number) => <option key={i} value={i}>{datasetLabel(d, i)}</option>)}</select></div>}
         {examples.isLoading && <div className="small-muted">Loading verified sample datasets…</div>}{examples.isError && <ErrorBlock error={examples.error} retry={() => void examples.refetch()} />}
         {Object.keys(cases).length > 1 && <label className="field"><span className="field-label">SELECT CASE</span><select value={caseId} onChange={(e) => { setCaseId(e.target.value); setObservations(cases[e.target.value] || []); setResult(null); }}>{Object.keys(cases).map(id => <option key={id} value={id}>{id} ({cases[id].length} observations)</option>)}</select></label>}
         {csvError && <div className="notice-line warning-line"><Info size={14} />{csvError}</div>}
         {observations.length > 0 ? <div className="csv-preview"><div className="preview-head"><b><CheckCircle2 size={14} /> Preview · {observations.length} rows</b><button className="text-button" onClick={() => { setObservations([]); setCases({}); setCaseId(''); setResult(null); }}><X size={14} /> Clear</button></div><div className="table-scroll"><table><thead><tr><th>Row</th><th>x value</th><th>Observed y</th></tr></thead><tbody>{observations.slice(0, 8).map((r, i) => <tr key={i}><td>{String(i + 1).padStart(2, '0')}</td><td>{fmt(r.x_value)}</td><td>{fmt(r.observed_y)}</td></tr>)}</tbody></table>{observations.length > 8 && <div className="preview-more">and {observations.length - 8} more rows</div>}</div></div> : <div className="empty-data-note"><FileSpreadsheet size={15} /><span>Waiting for observations. A minimum of two rows is required.</span></div>}
-        <Button disabled={observations.length < 2 || analyze.isPending} onClick={submit} className="full-button">{analyze.isPending ? 'Fitting model…' : <>Analyze observations <ArrowRight size={15} /></>}</Button>
-        {analyze.isError && <ErrorBlock error={analyze.error} retry={submit} />}
+        <Button disabled={observations.length < (numericMode ? 3 : 2) || analyze.isPending || numericPending || (numericMode && (!odeM.trim() || !odeN.trim() || !Number.isFinite(Number(initialX)) || !Number.isFinite(Number(initialGuess))))} onClick={submit} className="full-button">{analyze.isPending || numericPending ? 'Fitting model…' : <>Analyze observations <ArrowRight size={15} /></>}</Button>
+        {analyze.isError && !numericMode && <ErrorBlock error={analyze.error} retry={submit} />}
+        {numericError && <div className="notice-line warning-line"><Info size={14} />{numericError}</div>}
       </Card></div>
       <div className="fit-results-column">{result ? <Card className="fit-result-card"><div className="card-head"><div><div className="eyebrow">API ANALYSIS</div><h3>Fit summary</h3></div><button className="icon-button export-button" onClick={downloadCsv} title="Export rows as CSV" aria-label="Export results as CSV"><ArrowDownToLine size={17} /></button></div><div className="fit-parameter"><span><small>FITTED PARAMETER</small><b>{result.parameter_name || 'Parameter'}</b></span><strong>{fmt(result.parameter_value)}</strong></div><div className="metrics-grid">{metricEntries.length ? metricEntries.map(([key, val]) => <div className="metric-box" key={key}><small>{key.replaceAll('_', ' ')}</small><b>{fmt(val)}</b></div>) : <div className="empty-inline">No fit metrics were returned.</div>}</div>{result.note && <div className="analysis-note"><Info size={15} />{result.note}</div>}<div className="result-table-head"><div><div className="eyebrow">ROW-LEVEL COMPARISON</div><b>Observed vs fitted</b></div><span>{rows.length} rows</span></div>{rows.length > 0 && rows.some((r: any) => r.predicted_y != null) && <div className="chart-wrap"><PlotlyChart height={300} xTitle="x" yTitle="y" data={[{ type: 'scatter', mode: 'markers', name: 'Observed', x: rows.map((r: any) => r.x_value), y: rows.map((r: any) => r.observed_y), marker: {color:'#a892f4',size:8} }, {type: 'scatter', mode: 'lines+markers', name: 'Fitted model', x: rows.map((r: any) => r.x_value), y: rows.map((r: any) => r.predicted_y), line:{color:'#41d5e5'} }]} /></div>}
         {rows.length > 0 && rows.some((r: any) => r.residual != null) && <div className="chart-wrap"><h3>Residuals vs x</h3><PlotlyChart height={240} xTitle="x" yTitle="Observed − predicted" data={[{type:'scatter',mode:'markers',name:'Residuals',x:rows.map((r: any) => r.x_value),y:rows.map((r: any) => r.residual),marker:{color:'#f2c76e',size:8}}]} /></div>}
