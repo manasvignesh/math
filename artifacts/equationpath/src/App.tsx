@@ -42,6 +42,7 @@ import { type ReactNode } from "react";
 const Visualizer = lazy(() => import("@/components/Visualizer"));
 const Practice = lazy(() => import("@/components/Practice"));
 const Fitting = lazy(() => import("@/components/Fitting"));
+import EquationHelp from './components/EquationHelp';
 import MathView from "@/components/MathView";
 import { equationPreview, expressionLatex } from "@/lib/math-display";
 import { mathStatus } from "@/lib/browser-math";
@@ -241,7 +242,7 @@ function AppFrame({ children }: { children: ReactNode }) {
             </span>
           </div>
         </header>
-        <div className="page-wrap">{children}</div>
+        <div className="page-wrap"><EquationHelp path={path} status={engineStatus}/>{children}</div>
       </main>
     </div>
   );
@@ -1796,3 +1797,15 @@ function App() {
   );
 }
 export default App;
+
+export function EmbeddedEquationPath({ route, onNavigate }: { route: string; onNavigate?: (route: string) => void }) {
+  const [location, setLocation] = useState(route);
+  useEffect(() => { setLocation(route); }, [route]);
+  const hook = () => [location, (next: string) => {
+    const url = new URL(next, window.location.origin);
+    window.history.replaceState(null, '', window.location.pathname + url.search);
+    setLocation(url.pathname);
+    onNavigate?.(url.pathname);
+  }] as [string, (next: string) => void];
+  return <QueryClientProvider client={queryClient}><TooltipProvider><WouterRouter hook={hook}><Router /></WouterRouter><Toaster /></TooltipProvider></QueryClientProvider>;
+}
